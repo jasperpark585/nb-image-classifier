@@ -506,7 +506,7 @@ class NBClassifierApp:
 
     def _collect_groups(self, scan_dir: Path, include_ok: bool) -> Dict[str, Dict[str, List[Path]]]:
         groups: Dict[str, Dict[str, List[Path]]] = defaultdict(lambda: defaultdict(list))
-        files = [p for p in scan_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+        files = [p for p in scan_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
 
         for p in files:
             if not NB_ANY_PATTERN.search(p.name):
@@ -835,7 +835,7 @@ class NBClassifierApp:
                     if dst.exists():
                         dst = td / f"{p.stem}_{hashlib.sha1(str(p).encode('utf-8')).hexdigest()[:8]}{p.suffix}"
                     try:
-                        shutil.move(str(p), str(dst))
+                        shutil.copy2(str(p), str(dst))
                         moved += 1
                     except Exception:
                         pass
@@ -843,7 +843,7 @@ class NBClassifierApp:
             self.store.save_cache()
             self._save_config()
             elapsed = time.time() - started
-            self._log(f"완료: 그룹 {len(details_rows)}건, 파일 이동 {moved}건, 소요 {elapsed:.1f}s")
+            self._log(f"완료: 그룹 {len(details_rows)}건, 파일 복사 {moved}건, 소요 {elapsed:.1f}s")
             self._log(f"결과: {details_csv}")
             self._log(f"결과: {summary_csv}")
             messagebox.showinfo(APP_NAME, f"분류 완료\n\n{details_csv}\n{summary_csv}")
