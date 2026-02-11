@@ -213,3 +213,14 @@ type_name,threshold_mult,rescue_mult,margin_bias
 - `margin_bias`: -0.2 ~ 0.2
 
 예시 `Noread_PB상품구겨짐,1.00,1.00,-0.0075` 는 정상 범위이며 사용 가능합니다.
+
+
+## 16) EXE 빠른 생성 (배치파일 1번 실행)
+프로젝트 루트의 `build_windows_exe.bat`를 **Windows에서 더블클릭**하면,
+- 가상환경 생성
+- 의존성 설치
+- PyInstaller 빌드
+를 자동 수행합니다.
+
+완료 후 산출물:
+- `dist\NBImageClassifier\NBImageClassifier.exe`
