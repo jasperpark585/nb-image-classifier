@@ -12,6 +12,7 @@ import queue
 import random
 import re
 import shutil
+import subprocess
 import threading
 import time
 from collections import Counter, defaultdict
@@ -52,6 +53,13 @@ class FeatureRecord:
     size: int
     coarse: List[float]
     fine: List[float]
+
+
+@dataclass
+class TypeTuning:
+    threshold_mult: float = 1.0
+    rescue_mult: float = 1.0
+    margin_bias: float = 0.0
 
 
 class FeatureEngine:
@@ -250,11 +258,23 @@ def extract_view_tag(name: str) -> str:
     return "NA"
 
 
+def try_open_file(path: Path):
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif shutil.which("xdg-open"):
+            subprocess.Popen(["xdg-open", str(path)])
+        elif shutil.which("open"):
+            subprocess.Popen(["open", str(path)])
+    except Exception:
+        pass
+
+
 class NBClassifierApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("1220x780")
+        self.root.geometry("1240x790")
 
         self.store = TemplateStore()
         self.store.load_cache()
@@ -309,6 +329,8 @@ class NBClassifierApp:
         ttk.Spinbox(opt, from_=1, to=3, textvariable=self.min_support_views_var, width=7).grid(row=1, column=3, padx=4)
         ttk.Label(opt, text="Rescue 허용배수").grid(row=1, column=4, sticky="e")
         ttk.Spinbox(opt, from_=1.0, to=1.5, increment=0.01, textvariable=self.rescue_factor_var, width=7).grid(row=1, column=5, padx=4)
+
+        ttk.Button(opt, text="유형 튜닝 CSV 열기/생성", command=self.open_or_create_tuning_csv).grid(row=1, column=6, columnspan=2, padx=6)
 
         main = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         main.pack(fill="both", expand=True, padx=8, pady=6)
@@ -374,6 +396,25 @@ class NBClassifierApp:
         p = filedialog.askdirectory(title="템플릿 루트 폴더 선택")
         if p:
             self.template_root_var.set(p)
+
+    def _tuning_csv_path(self) -> Optional[Path]:
+        root = self.template_root_var.get().strip()
+        if not root:
+            return None
+        return Path(root) / "type_tuning.csv"
+
+    def open_or_create_tuning_csv(self):
+        p = self._tuning_csv_path()
+        if p is None:
+            messagebox.showwarning(APP_NAME, "먼저 템플릿 루트 폴더를 선택하세요.")
+            return
+        if not p.exists():
+            with p.open("w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["type_name", "threshold_mult", "rescue_mult", "margin_bias"])
+                w.writerow(["예시유형", 1.00, 1.00, 0.00])
+        try_open_file(p)
+        self._log(f"유형 튜닝 CSV 경로: {p}")
 
     def preview_register(self):
         folder = self.template_root_var.get().strip()
@@ -471,7 +512,27 @@ class NBClassifierApp:
                     groups[ck][extract_view_tag(p.name)].append(p)
         return groups
 
-    def _build_type_profiles(self, by_type: Dict[str, List[FeatureRecord]]) -> Dict[str, dict]:
+    def _load_type_tuning(self, template_root: Path) -> Dict[str, TypeTuning]:
+        out: Dict[str, TypeTuning] = {}
+        p = template_root / "type_tuning.csv"
+        if not p.exists():
+            return out
+        try:
+            with p.open("r", newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    name = (row.get("type_name") or "").strip()
+                    if not name:
+                        continue
+                    out[name] = TypeTuning(
+                        threshold_mult=float(row.get("threshold_mult", 1.0) or 1.0),
+                        rescue_mult=float(row.get("rescue_mult", 1.0) or 1.0),
+                        margin_bias=float(row.get("margin_bias", 0.0) or 0.0),
+                    )
+        except Exception as e:
+            self._log(f"유형 튜닝 CSV 로드 실패: {e}")
+        return out
+
+    def _build_type_profiles(self, by_type: Dict[str, List[FeatureRecord]], tuning_map: Dict[str, TypeTuning]) -> Dict[str, dict]:
         profiles: Dict[str, dict] = {}
         for tname, feats in by_type.items():
             n = len(feats)
@@ -488,12 +549,18 @@ class NBClassifierApp:
             fmean = [x / n for x in fmean]
             dists = [l1_distance(f.fine, fmean) for f in feats]
             mu, sd = mean_std(dists)
+
+            tune = tuning_map.get(tname, TypeTuning())
+            base_threshold = mu + 2.2 * sd
             profiles[tname] = {
                 "coarse_centroid": cmean,
                 "features": feats,
                 "fine_mu": mu,
                 "fine_sd": sd,
-                "accept_threshold": mu + 2.2 * sd,
+                "accept_threshold": base_threshold * max(0.2, tune.threshold_mult),
+                "rescue_threshold": base_threshold * max(0.2, tune.rescue_mult),
+                "margin_bias": tune.margin_bias,
+                "tuning": tune,
             }
         return profiles
 
@@ -502,6 +569,7 @@ class NBClassifierApp:
         try:
             self._save_config()
             scan_dir = Path(self.scan_folder_var.get().strip())
+            template_root = Path(self.template_root_var.get().strip()) if self.template_root_var.get().strip() else scan_dir
             include_ok = self.include_ok_var.get()
             preprocess = self.preprocess_var.get()
             max_tpl = max(5, int(self.max_templates_var.get()))
@@ -509,6 +577,10 @@ class NBClassifierApp:
             margin = max(0.0, float(self.unmatched_margin_var.get()))
             min_support = max(1, int(self.min_support_views_var.get()))
             rescue_factor = max(1.0, float(self.rescue_factor_var.get()))
+
+            tuning_map = self._load_type_tuning(template_root)
+            if tuning_map:
+                self._log(f"유형 튜닝 로드: {len(tuning_map)}개")
 
             engine = FeatureEngine(preprocess=preprocess)
             sampled = self.store.sample_per_type(max_tpl)
@@ -531,7 +603,7 @@ class NBClassifierApp:
                 self._log("유효한 템플릿 특징이 없습니다.")
                 return
 
-            profiles = self._build_type_profiles(by_type_feats)
+            profiles = self._build_type_profiles(by_type_feats, tuning_map)
             self._log(f"유형 프로파일 생성 완료: {len(profiles)}개")
 
             groups = self._collect_groups(scan_dir, include_ok)
@@ -552,11 +624,10 @@ class NBClassifierApp:
                     return None
 
                 view_best_type: Dict[str, str] = {}
-                view_best_score: Dict[str, float] = {}
                 agg: Dict[str, List[float]] = defaultdict(list)
                 used_paths: List[Path] = []
 
-                for vtag, files in views.items():
+                for _vtag, files in views.items():
                     if not files:
                         continue
                     qpath = files[0]
@@ -565,25 +636,21 @@ class NBClassifierApp:
                     if not qf:
                         continue
 
-                    coarse_rank = sorted(
-                        (l1_distance(qf.coarse, p["coarse_centroid"]), tname) for tname, p in profiles.items()
-                    )
+                    coarse_rank = sorted((l1_distance(qf.coarse, p["coarse_centroid"]), t) for t, p in profiles.items())
                     candidate_types = [t for _, t in coarse_rank[:top_k]]
 
                     fine_scores = []
-                    for tname in candidate_types:
-                        feats = profiles[tname]["features"]
+                    for t in candidate_types:
+                        feats = profiles[t]["features"]
                         best = min(l1_distance(qf.fine, tf.fine) for tf in feats)
-                        fine_scores.append((best, tname))
+                        fine_scores.append((best, t))
                     if not fine_scores:
                         continue
                     fine_scores.sort()
                     best_score, best_type = fine_scores[0]
-
-                    view_best_type[vtag] = best_type
-                    view_best_score[vtag] = best_score
-                    for score, tname in fine_scores:
-                        agg[tname].append(score)
+                    view_best_type[str(qpath)] = best_type
+                    for score, t in fine_scores:
+                        agg[t].append(score)
 
                 if not used_paths or not agg:
                     return {
@@ -595,6 +662,13 @@ class NBClassifierApp:
                         "used_paths": used_paths,
                         "used_view_count": len(used_paths),
                         "decision_mode": "no_feature",
+                        "unmatched_reason": "이미지 특징 추출 실패 또는 비교 후보 없음",
+                        "best_type": "",
+                        "best_threshold": "",
+                        "margin_value": "",
+                        "top_vote_type": "",
+                        "top_vote_count": 0,
+                        "type_tuning": "",
                     }
 
                 ranked = sorted((sum(v) / len(v), t) for t, v in agg.items())
@@ -604,19 +678,18 @@ class NBClassifierApp:
 
                 p = profiles[best_type]
                 type_threshold = p["accept_threshold"]
-                strict_pass = local_margin >= margin and best_score <= type_threshold
+                rescue_threshold = p["rescue_threshold"] * rescue_factor
+                local_margin_need = margin + p["margin_bias"]
+                strict_pass = local_margin >= local_margin_need and best_score <= type_threshold
 
-                # Rescue rule: when multiple views agree on same type and score is near threshold.
                 vote = Counter(view_best_type.values())
-                top_vote_type, top_vote_count = (None, 0)
+                top_vote_type, top_vote_count = ("", 0)
                 if vote:
                     top_vote_type, top_vote_count = vote.most_common(1)[0]
-                rescue_pass = (
-                    top_vote_type == best_type
-                    and top_vote_count >= min_support
-                    and best_score <= type_threshold * rescue_factor
-                )
+                rescue_pass = top_vote_type == best_type and top_vote_count >= min_support and best_score <= rescue_threshold
 
+                unmatched_reason = ""
+                mode = ""
                 if strict_pass:
                     result = best_type
                     mode = "strict"
@@ -626,6 +699,21 @@ class NBClassifierApp:
                 else:
                     result = "UNMATCHED"
                     mode = "unmatched"
+                    reasons = []
+                    if local_margin < local_margin_need:
+                        reasons.append(f"마진부족({local_margin:.4f} < 필요 {local_margin_need:.4f})")
+                    if best_score > type_threshold:
+                        reasons.append(f"유형임계초과(score {best_score:.4f} > thr {type_threshold:.4f})")
+                    if top_vote_type != best_type:
+                        reasons.append("뷰합의불충분(최다득표 유형 불일치)")
+                    elif top_vote_count < min_support:
+                        reasons.append(f"뷰합의수 부족({top_vote_count} < {min_support})")
+                    if best_score > rescue_threshold:
+                        reasons.append(f"rescue임계초과(score {best_score:.4f} > rescue_thr {rescue_threshold:.4f})")
+                    unmatched_reason = " | ".join(reasons) if reasons else "조건 미충족"
+
+                tune = p["tuning"]
+                type_tuning = f"thr*{tune.threshold_mult:.3f},rescue*{tune.rescue_mult:.3f},margin_bias={tune.margin_bias:.4f}"
 
                 return {
                     "group_key": group_key,
@@ -636,6 +724,13 @@ class NBClassifierApp:
                     "used_paths": used_paths,
                     "used_view_count": len(used_paths),
                     "decision_mode": mode,
+                    "unmatched_reason": unmatched_reason,
+                    "best_type": best_type,
+                    "best_threshold": round(type_threshold, 6),
+                    "margin_value": round(local_margin, 6),
+                    "top_vote_type": top_vote_type,
+                    "top_vote_count": top_vote_count,
+                    "type_tuning": type_tuning,
                 }
 
             self._log(f"그룹 분류 시작... worker={max_workers}")
@@ -658,6 +753,13 @@ class NBClassifierApp:
                             "distance_second": round(res["second_score"], 6),
                             "used_view_count": res["used_view_count"],
                             "decision_mode": res["decision_mode"],
+                            "unmatched_reason": res["unmatched_reason"],
+                            "best_type": res["best_type"],
+                            "best_threshold": res["best_threshold"],
+                            "margin_value": res["margin_value"],
+                            "top_vote_type": res["top_vote_type"],
+                            "top_vote_count": res["top_vote_count"],
+                            "type_tuning": res["type_tuning"],
                             "used_paths": " | ".join(str(p) for p in res["used_paths"]),
                         }
                     )
@@ -686,6 +788,13 @@ class NBClassifierApp:
                         "distance_second",
                         "used_view_count",
                         "decision_mode",
+                        "unmatched_reason",
+                        "best_type",
+                        "best_threshold",
+                        "margin_value",
+                        "top_vote_type",
+                        "top_vote_count",
+                        "type_tuning",
                         "used_paths",
                     ],
                 )

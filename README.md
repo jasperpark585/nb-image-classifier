@@ -167,3 +167,34 @@ py -3.11 -m PyInstaller --noconfirm --clean --windowed --onefile --noupx --name 
 2. `Rescue 최소뷰=2`, `Rescue 허용배수=1.10~1.15`로 시작
 3. 여전히 UNMATCHED가 많으면 허용배수를 +0.02씩 증가
 4. 오분류가 늘면 허용배수를 -0.02 하거나 최소뷰를 3으로 상향
+
+
+## 13) UNMATCHED 원인 확인 (이번 버전)
+`details.csv`에 아래 디버깅 컬럼이 추가됩니다.
+- `decision_mode`: strict / rescue_consensus / unmatched / no_feature
+- `unmatched_reason`: UNMATCHED가 된 구체 원인 문자열
+- `best_type`, `best_threshold`, `margin_value`
+- `top_vote_type`, `top_vote_count`
+- `type_tuning`
+
+이 값으로 “마진 부족인지 / 유형 임계치 초과인지 / 뷰 합의 부족인지”를 바로 확인할 수 있습니다.
+
+## 14) 특정 유형만 성능 저하 시 조정 방법
+템플릿 루트 폴더에 `type_tuning.csv`를 만들어 유형별로 임계치를 개별 조정할 수 있습니다.
+UI의 **유형 튜닝 CSV 열기/생성** 버튼을 누르면 파일이 자동 생성됩니다.
+
+CSV 형식:
+```csv
+type_name,threshold_mult,rescue_mult,margin_bias
+라벨훼손_구김,1.05,1.10,0.00
+반사,0.95,1.00,0.01
+```
+
+- `threshold_mult`: 해당 유형 strict 임계치 배수 (크면 완화, 작으면 강화)
+- `rescue_mult`: 해당 유형 rescue 임계치 배수
+- `margin_bias`: 해당 유형에만 추가 마진 요구치(+면 더 보수적)
+
+### 권장 운영 팁
+1. 특정 유형에서 UNMATCHED가 과도하면 해당 유형 `threshold_mult`를 +0.03~0.08
+2. 오분류가 늘면 `margin_bias`를 +0.01~0.03
+3. 다뷰 합의는 좋은데 strict 탈락이 많으면 `rescue_mult`를 +0.03~0.07
