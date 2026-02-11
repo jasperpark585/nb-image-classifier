@@ -198,3 +198,18 @@ type_name,threshold_mult,rescue_mult,margin_bias
 1. 특정 유형에서 UNMATCHED가 과도하면 해당 유형 `threshold_mult`를 +0.03~0.08
 2. 오분류가 늘면 `margin_bias`를 +0.01~0.03
 3. 다뷰 합의는 좋은데 strict 탈락이 많으면 `rescue_mult`를 +0.03~0.07
+
+
+## 15) 오류 대응: `COORDINATE 'LOWER' IS LESS THAN 'UPPER'`
+일부 손상/비정상 해상도 이미지에서 PIL crop 좌표가 역전되며 발생할 수 있는 오류입니다.
+최신 버전은 다음을 반영해 자동 회피합니다.
+- 비정상 크기 이미지(0x0 등) 자동 스킵
+- 블록/중앙 crop 좌표를 항상 안전 범위로 보정
+- 특징 추출 예외 발생 시 해당 파일만 스킵하고 작업 계속
+
+또한 `type_tuning.csv`의 값은 아래 범위로 자동 보정됩니다.
+- `threshold_mult`: 0.2 ~ 3.0
+- `rescue_mult`: 0.2 ~ 3.0
+- `margin_bias`: -0.2 ~ 0.2
+
+예시 `Noread_PB상품구겨짐,1.00,1.00,-0.0075` 는 정상 범위이며 사용 가능합니다.

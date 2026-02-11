@@ -72,7 +72,11 @@ class FeatureEngine:
         try:
             with Image.open(path) as im:
                 im = im.convert("RGB")
+                if im.width < 1 or im.height < 1:
+                    return None
                 im.thumbnail((self.max_dim, self.max_dim), Image.Resampling.LANCZOS)
+                if im.width < 1 or im.height < 1:
+                    return None
                 return im.copy()
         except Exception:
             return None
@@ -103,6 +107,8 @@ class FeatureEngine:
                 x0, y0 = bx * bw, by * bh
                 x1 = w if bx == blocks - 1 else (bx + 1) * bw
                 y1 = h if by == blocks - 1 else (by + 1) * bh
+                x1 = max(x0 + 1, x1)
+                y1 = max(y0 + 1, y1)
                 vals = list(img.crop((x0, y0, x1, y1)).getdata())
                 if not vals:
                     out.extend([0.0, 0.0])
@@ -113,26 +119,34 @@ class FeatureEngine:
         return out
 
     def extract(self, path: Path) -> Optional[Tuple[List[float], List[float]]]:
-        img = self._safe_open(path)
-        if img is None:
+        try:
+            img = self._safe_open(path)
+            if img is None:
+                return None
+            proc = self._preprocess(img)
+            if proc.mode != "L":
+                proc = ImageOps.grayscale(proc)
+
+            if proc.width < 1 or proc.height < 1:
+                return None
+
+            coarse = self._avg_hash(proc, 8)
+            full_hash = self._avg_hash(proc, 16)
+            full_stats = self._block_stats(proc, 4)
+
+            w, h = proc.size
+            cx0, cy0 = int(w * 0.2), int(h * 0.2)
+            cx1, cy1 = int(w * 0.8), int(h * 0.8)
+            rx1 = max(cx0 + 1, cx1)
+            ry1 = max(cy0 + 1, cy1)
+            center = proc.crop((cx0, cy0, rx1, ry1))
+            center_hash = self._avg_hash(center, 8)
+            center_stats = self._block_stats(center, 3)
+
+            fine = full_hash + full_stats + center_hash + center_stats
+            return coarse, fine
+        except Exception:
             return None
-        proc = self._preprocess(img)
-        if proc.mode != "L":
-            proc = ImageOps.grayscale(proc)
-
-        coarse = self._avg_hash(proc, 8)
-        full_hash = self._avg_hash(proc, 16)
-        full_stats = self._block_stats(proc, 4)
-
-        w, h = proc.size
-        cx0, cy0 = int(w * 0.2), int(h * 0.2)
-        cx1, cy1 = int(w * 0.8), int(h * 0.8)
-        center = proc.crop((cx0, cy0, max(cx0 + 1, cx1), max(cy0 + 1, cy1)))
-        center_hash = self._avg_hash(center, 8)
-        center_stats = self._block_stats(center, 3)
-
-        fine = full_hash + full_stats + center_hash + center_stats
-        return coarse, fine
 
 
 def l1_distance(a: List[float], b: List[float]) -> float:
@@ -523,10 +537,13 @@ class NBClassifierApp:
                     name = (row.get("type_name") or "").strip()
                     if not name:
                         continue
+                    tm = float(row.get("threshold_mult", 1.0) or 1.0)
+                    rm = float(row.get("rescue_mult", 1.0) or 1.0)
+                    mb = float(row.get("margin_bias", 0.0) or 0.0)
                     out[name] = TypeTuning(
-                        threshold_mult=float(row.get("threshold_mult", 1.0) or 1.0),
-                        rescue_mult=float(row.get("rescue_mult", 1.0) or 1.0),
-                        margin_bias=float(row.get("margin_bias", 0.0) or 0.0),
+                        threshold_mult=max(0.2, min(3.0, tm)),
+                        rescue_mult=max(0.2, min(3.0, rm)),
+                        margin_bias=max(-0.2, min(0.2, mb)),
                     )
         except Exception as e:
             self._log(f"유형 튜닝 CSV 로드 실패: {e}")
