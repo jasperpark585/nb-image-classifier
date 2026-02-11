@@ -228,3 +228,13 @@ type_name,threshold_mult,rescue_mult,margin_bias
 
 완료 후 산출물:
 - `dist\NBImageClassifier\NBImageClassifier.exe`
+
+
+## 17) 오분류 원인 기준이미지 추적/삭제 방법
+이제 `details.csv`에 아래 컬럼이 추가됩니다.
+- `best_template_paths_by_view`: 뷰별(01/02/03) 최종 점수에 가장 영향을 준 템플릿 경로
+- `influential_template_candidates`: 영향도가 큰 템플릿 상위 후보(출현 횟수 포함)
+
+예: `Noread_PB상품구겨짐`이어야 하는데 `Noread_송장없음`으로 분류된 건에서
+`influential_template_candidates`에 반복 등장하는 템플릿 경로를 확인한 뒤,
+UI의 **경로 검색**에 경로 일부를 입력하고 **선택 삭제**로 혼선 템플릿을 제거할 수 있습니다.

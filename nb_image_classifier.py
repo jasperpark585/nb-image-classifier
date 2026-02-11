@@ -361,6 +361,12 @@ class NBClassifierApp:
         ttk.Button(btns, text="선택 삭제", command=self.delete_selected_templates).pack(side="left", padx=2)
         ttk.Button(btns, text="전체 삭제", command=self.clear_templates).pack(side="left", padx=2)
 
+        find_row = ttk.Frame(left)
+        find_row.pack(fill="x", pady=3)
+        self.template_search_var = tk.StringVar()
+        ttk.Entry(find_row, textvariable=self.template_search_var).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(find_row, text="경로 검색", command=self.select_template_by_path).pack(side="left", padx=2)
+
         self.template_list = tk.Listbox(left, selectmode=tk.EXTENDED)
         self.template_list.pack(fill="both", expand=True)
         self.template_list.bind("<<ListboxSelect>>", self.show_selected_thumbnail)
@@ -459,6 +465,22 @@ class NBClassifierApp:
         self.store.remove_indices(sel)
         self._refresh_template_list()
         self._save_config()
+
+    def select_template_by_path(self):
+        needle = self.template_search_var.get().strip().lower()
+        if not needle:
+            return
+        self.template_list.selection_clear(0, "end")
+        matched = 0
+        for i, t in enumerate(self.store.templates):
+            if needle in t.path.lower():
+                self.template_list.selection_set(i)
+                matched += 1
+        if matched > 0:
+            self.template_list.see(self.template_list.curselection()[0])
+            self._log(f"기준이미지 경로 검색: {matched}개 선택됨")
+        else:
+            self._log("기준이미지 경로 검색: 일치 항목 없음")
 
     def clear_templates(self):
         if messagebox.askyesno(APP_NAME, "기준 이미지를 모두 삭제할까요?"):
@@ -643,6 +665,8 @@ class NBClassifierApp:
                 view_best_type: Dict[str, str] = {}
                 agg: Dict[str, List[float]] = defaultdict(list)
                 used_paths: List[Path] = []
+                best_template_by_view: Dict[str, str] = {}
+                top_template_hits: Counter[str] = Counter()
 
                 for _vtag, files in views.items():
                     if not files:
@@ -659,14 +683,17 @@ class NBClassifierApp:
                     fine_scores = []
                     for t in candidate_types:
                         feats = profiles[t]["features"]
-                        best = min(l1_distance(qf.fine, tf.fine) for tf in feats)
-                        fine_scores.append((best, t))
+                        best_tf = min(feats, key=lambda tf: l1_distance(qf.fine, tf.fine))
+                        best = l1_distance(qf.fine, best_tf.fine)
+                        fine_scores.append((best, t, best_tf.path))
                     if not fine_scores:
                         continue
                     fine_scores.sort()
-                    best_score, best_type = fine_scores[0]
+                    best_score, best_type, best_template_path = fine_scores[0]
                     view_best_type[str(qpath)] = best_type
-                    for score, t in fine_scores:
+                    best_template_by_view[str(qpath)] = best_template_path
+                    top_template_hits[best_template_path] += 1
+                    for score, t, _template_path in fine_scores:
                         agg[t].append(score)
 
                 if not used_paths or not agg:
@@ -686,6 +713,8 @@ class NBClassifierApp:
                         "top_vote_type": "",
                         "top_vote_count": 0,
                         "type_tuning": "",
+                        "best_template_paths_by_view": "",
+                        "influential_template_candidates": "",
                     }
 
                 ranked = sorted((sum(v) / len(v), t) for t, v in agg.items())
@@ -731,6 +760,10 @@ class NBClassifierApp:
 
                 tune = p["tuning"]
                 type_tuning = f"thr*{tune.threshold_mult:.3f},rescue*{tune.rescue_mult:.3f},margin_bias={tune.margin_bias:.4f}"
+                view_template_text = " | ".join(f"{k} -> {v}" for k, v in best_template_by_view.items())
+                top_influential = " | ".join(
+                    f"{tp}({cnt})" for tp, cnt in top_template_hits.most_common(5)
+                )
 
                 return {
                     "group_key": group_key,
@@ -748,6 +781,8 @@ class NBClassifierApp:
                     "top_vote_type": top_vote_type,
                     "top_vote_count": top_vote_count,
                     "type_tuning": type_tuning,
+                    "best_template_paths_by_view": view_template_text,
+                    "influential_template_candidates": top_influential,
                 }
 
             self._log(f"그룹 분류 시작... worker={max_workers}")
@@ -777,6 +812,8 @@ class NBClassifierApp:
                             "top_vote_type": res["top_vote_type"],
                             "top_vote_count": res["top_vote_count"],
                             "type_tuning": res["type_tuning"],
+                            "best_template_paths_by_view": res["best_template_paths_by_view"],
+                            "influential_template_candidates": res["influential_template_candidates"],
                             "used_paths": " | ".join(str(p) for p in res["used_paths"]),
                         }
                     )
@@ -812,6 +849,8 @@ class NBClassifierApp:
                         "top_vote_type",
                         "top_vote_count",
                         "type_tuning",
+                        "best_template_paths_by_view",
+                        "influential_template_candidates",
                         "used_paths",
                     ],
                 )
